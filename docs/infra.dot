@@ -1,0 +1,85 @@
+digraph INFRA {
+  node [ color = "black", fillcolor = "#E6E6E6", height =1, style = "filled,bold,rounded", fontname = "Arial" ];
+  "vpc-main" [ label = "vpc-main
+(AWS::EC2::VPC)" ];
+  "subnet-public-1" [ label = "subnet-public-1
+(AWS::EC2::Subnet)" ];
+  "subnet-public-2" [ label = "subnet-public-2
+(AWS::EC2::Subnet)" ];
+  "igw-main" [ label = "igw-main
+(AWS::EC2::InternetGateway)" ];
+  "rt-public" [ label = "rt-public
+(AWS::EC2::RouteTable)" ];
+  "internet-route" [ label = "internet-route
+(AWS::EC2::Route)" ];
+  "rt-assoc-public-1" [ label = "rt-assoc-public-1
+(AWS::EC2::SubnetRouteTableAssociation)" ];
+  "rt-assoc-public-2" [ label = "rt-assoc-public-2
+(AWS::EC2::SubnetRouteTableAssociation)" ];
+  "sg-alb" [ label = "sg-alb
+(AWS::EC2::SecurityGroup)" ];
+  "sg-instance" [ label = "sg-instance
+(AWS::EC2::SecurityGroup)" ];
+  "role-codedeploy" [ label = "role-codedeploy
+(AWS::IAM::Role)", shape =rectangle ];
+  "codedeploy-autoscaling-policy" [ label = "codedeploy-autoscaling-policy
+(AWS::IAM::Policy)", shape =rectangle ];
+  "attach-cd-managed" [ label = "attach-cd-managed
+(AWS::IAM::PolicyAttachment)", shape =rectangle ];
+  "role-ec2" [ label = "role-ec2
+(AWS::IAM::Role)", shape =rectangle ];
+  "ec2-s3-policy" [ label = "ec2-s3-policy
+(AWS::IAM::Policy)", shape =rectangle ];
+  "attach-ssm" [ label = "attach-ssm
+(AWS::IAM::PolicyAttachment)", shape =rectangle ];
+  "profile-ec2" [ label = "profile-ec2
+(AWS::IAM::InstanceProfile)", shape =rectangle ];
+  "alb" [ label = "alb
+(AWS::ElasticLoadBalancingV2::LoadBalancer)", shape =rectangle, fillcolor = "#E78F81" ];
+  "blue-tg" [ label = "blue-tg
+(AWS::ElasticLoadBalancingV2::TargetGroup)", shape =rectangle, fillcolor = "#E78F81" ];
+  "green-tg" [ label = "green-tg
+(AWS::ElasticLoadBalancingV2::TargetGroup)", shape =rectangle, fillcolor = "#E78F81" ];
+  "alb-listener" [ label = "alb-listener
+(AWS::ElasticLoadBalancingV2::Listener)", shape =rectangle, fillcolor = "#E78F81" ];
+  "asg-blue" [ label = "asg-blue
+(AWS::AutoScaling::AutoScalingGroup)", shape =rectangle, fillcolor = "#B7E0FF" ];
+  "codedeploy-app" [ label = "codedeploy-app
+(AWS::CodeDeploy::Application)", shape =rectangle ];
+  "codedeploy-deployment-group" [ label = "codedeploy-deployment-group
+(AWS::CodeDeploy::DeploymentGroup)", shape =rectangle ];
+  "subnet-public-1" -> "vpc-main";
+  "subnet-public-2" -> "vpc-main";
+  "igw-main" -> "vpc-main";
+  "rt-public" -> "vpc-main";
+  "internet-route" -> "rt-public";
+  "internet-route" -> "igw-main";
+  "rt-assoc-public-1" -> "subnet-public-1";
+  "rt-assoc-public-1" -> "rt-public";
+  "rt-assoc-public-2" -> "subnet-public-2";
+  "rt-assoc-public-2" -> "rt-public";
+  "sg-alb" -> "vpc-main";
+  "sg-instance" -> "vpc-main";
+  "sg-instance" -> "sg-alb";
+  "codedeploy-autoscaling-policy" -> "role-codedeploy";
+  "attach-cd-managed" -> "role-codedeploy";
+  "ec2-s3-policy" -> "role-ec2";
+  "attach-ssm" -> "role-ec2";
+  "profile-ec2" -> "role-ec2";
+  "alb" -> "subnet-public-1";
+  "alb" -> "subnet-public-2";
+  "alb" -> "sg-alb";
+  "blue-tg" -> "vpc-main";
+  "green-tg" -> "vpc-main";
+  "alb-listener" -> "alb";
+  "alb-listener" -> "blue-tg";
+  "asg-blue" -> "profile-ec2";
+  "asg-blue" -> "blue-tg";
+  "asg-blue" -> "subnet-public-1";
+  "asg-blue" -> "subnet-public-2";
+  "codedeploy-deployment-group" -> "role-codedeploy";
+  "codedeploy-deployment-group" -> "blue-tg";
+  "codedeploy-deployment-group" -> "green-tg";
+  "codedeploy-deployment-group" -> "asg-blue";
+  "codedeploy-deployment-group" -> "codedeploy-app";
+}

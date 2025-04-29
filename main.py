@@ -1,9 +1,12 @@
+#!/usr/bin/env python
 import uuid
+import base64
 from constructs import Construct
 from cdktf import App, TerraformStack, TerraformOutput
 
 # CDKTF AWS Provider constructs
 from cdktf_cdktf_provider_aws.provider import AwsProvider
+from cdktf_cdktf_provider_aws.data_aws_ami import DataAwsAmi
 from cdktf_cdktf_provider_aws.vpc import Vpc
 from cdktf_cdktf_provider_aws.subnet import Subnet
 from cdktf_cdktf_provider_aws.internet_gateway import InternetGateway
@@ -27,33 +30,48 @@ from cdktf_cdktf_provider_aws.autoscaling_group import AutoscalingGroup, Autosca
 from cdktf_cdktf_provider_aws.codedeploy_app import CodedeployApp
 from cdktf_cdktf_provider_aws.codedeploy_deployment_group import CodedeployDeploymentGroup
 
-# --- Configuration Constants ----------------------------------------------------
+# ─── Configuration Constants ────────────────────────────────────────────────────
 
-REGION               = "ap-south-1"
-VPC_CIDR             = "10.0.0.0/16"
-AVAILABILITY_ZONES   = ["ap-south-1a", "ap-south-1b"]
-INSTANCE_TYPE        = "t2.micro"
+REGION             = "ap-south-1"
+VPC_CIDR           = "10.0.0.0/16"
+AVAILABILITY_ZONES = ["ap-south-1a", "ap-south-1b"]
+INSTANCE_TYPE      = "t3.micro"
+
+# Raw bootstrap script for EC2 instances
+USER_DATA = """#!/bin/bash
+yum update -y && yum install -y ruby wget httpd
+systemctl enable --now httpd
+echo "<h1>Hello World V1 from $(hostname -f)</h1>" > /var/www/html/index.html
+cd /home/ec2-user
+wget https://aws-codedeploy-ap-south-1.s3.ap-south-1.amazonaws.com/latest/install
+chmod +x ./install
+./install auto
+systemctl enable --now codedeploy-agent
+mkdir -p /home/ec2-user/my-application
+chown -R ec2-user:ec2-user /home/ec2-user
+chmod 755 /home/ec2-user
+"""
 
 # Inline IAM policy documents
-CODEDEPLOY_ASSUME_ROLE_POLICY = '''{
+CODEDEPLOY_ASSUME_ROLE_POLICY = """{
   "Version":"2012-10-17",
   "Statement":[{
       "Action":"sts:AssumeRole",
       "Effect":"Allow",
       "Principal":{"Service":"codedeploy.amazonaws.com"}
   }]
-}'''
+}"""
 
-EC2_ASSUME_ROLE_POLICY = '''{
+EC2_ASSUME_ROLE_POLICY = """{
   "Version":"2012-10-17",
   "Statement":[{
       "Action":"sts:AssumeRole",
       "Effect":"Allow",
       "Principal":{"Service":"ec2.amazonaws.com"}
   }]
-}'''
+}"""
 
-CODEDEPLOY_AUTOSCALING_POLICY = '''{
+CODEDEPLOY_AUTOSCALING_POLICY = """{
   "Version":"2012-10-17",
   "Statement":[{
       "Effect":"Allow",
@@ -65,9 +83,9 @@ CODEDEPLOY_AUTOSCALING_POLICY = '''{
       ],
       "Resource":"*"
   }]
-}'''
+}"""
 
-EC2_S3_POLICY = '''{
+EC2_S3_POLICY = """{
   "Version":"2012-10-17",
   "Statement":[{
       "Effect":"Allow",
@@ -80,26 +98,22 @@ EC2_S3_POLICY = '''{
           "arn:aws:s3:::python-demo-application-deployment-bucket/*"
       ]
   }]
-}'''
+}"""
 
-# --- Helper Functions -----------------------------------------------------------
+# ─── Helper Functions ───────────────────────────────────────────────────────────
 
 def create_resource_tags(base_tags: dict, name: str) -> dict:
-    """
-    Merge a common tags dictionary with a Name tag.
-    """
+    """Merge a common tags dictionary with a Name tag."""
     return {**base_tags, "Name": f"{name}"}
 
 def create_target_group_config(name: str, unique: str, vpc_id: str, tags: dict) -> dict:
-    """
-    Build the kwargs for an Application Load Balancer target group.
-    """
+    """Build the kwargs for an Application Load Balancer target group."""
     return {
-        "name":            f"{name}-tg-{unique}",
-        "port":            80,
-        "protocol":        "HTTP",
-        "vpc_id":          vpc_id,
-        "target_type":     "instance",
+        "name":        f"{name}-tg-{unique}",
+        "port":        80,
+        "protocol":    "HTTP",
+        "vpc_id":      vpc_id,
+        "target_type": "instance",
         "health_check": {
             "enabled":             True,
             "interval":            30,
@@ -113,13 +127,10 @@ def create_target_group_config(name: str, unique: str, vpc_id: str, tags: dict) 
         "tags": create_resource_tags(tags, f"{name}-tg")
     }
 
-# --- Main Stack ----------------------------------------------------------------
+# ─── Main Stack ────────────────────────────────────────────────────────────────
 
 class MyStack(TerraformStack):
-    """
-    CDKTF stack for AWS Blue-Green Deployment infrastructure.
-    """
-
+    """CDKTF stack for AWS Blue-Green Deployment infrastructure."""
     def __init__(self, scope: Construct, id: str):
         super().__init__(scope, id)
 
@@ -131,34 +142,51 @@ class MyStack(TerraformStack):
             "ManagedBy":   "CDKTF"
         }
 
-        # 1) Initialize AWS provider
+        # 1) AWS provider
         AwsProvider(self, "AWS", region=REGION)
 
-        # 2) Networking: VPC, subnets, IGW + routing
+        # 2) Latest Amazon Linux 2 AMI (official owner "amazon")
+        ami = DataAwsAmi(self, "amazon_linux_2",
+            most_recent = True,
+            owners      = ["amazon"],
+            filter      = [
+                {"name": "name",                "values": ["amzn2-ami-hvm-*-x86_64-gp2"]},
+                {"name": "virtualization-type", "values": ["hvm"]},
+                {"name": "root-device-type",    "values": ["ebs"]}
+            ]
+        )
+
+        # 3) Base64-encode the user data once
+        encoded_user_data = base64.b64encode(USER_DATA.encode("utf-8")).decode("utf-8")
+
+        # 4) Networking
         vpc            = self._create_vpc()
         public_subnets = self._create_public_subnets(vpc)
         self._create_internet_gateway(vpc, public_subnets)
 
-        # 3) Security groups
+        # 5) Security Groups
         alb_sg, inst_sg = self._create_security_groups(vpc)
 
-        # 4) IAM Roles & Instance Profile
+        # 6) IAM Roles & Instance Profile
         cd_role      = self._create_codedeploy_role()
         inst_profile = self._create_ec2_role_and_profile()
 
-        # 5) ALB & Target Groups
+        # 7) ALB & Target Groups
         alb, blue_tg, green_tg = self._create_load_balancer(public_subnets, alb_sg, vpc)
 
-        # 6) Auto Scaling Group (blue fleet)
-        asg_blue = self._create_auto_scaling_group(inst_sg, inst_profile, blue_tg, public_subnets)
+        # 8) Auto Scaling Group with Base64-encoded user_data
+        asg_blue = self._create_auto_scaling_group(
+            inst_sg, inst_profile, blue_tg, public_subnets, ami.id, encoded_user_data
+        )
 
-        # 7) CodeDeploy Application & Deployment Group
+        # 9) CodeDeploy
         self._create_codedeploy_resources(cd_role, blue_tg, green_tg, asg_blue)
 
-        # 8) Expose outputs
+        # 10) Outputs
         self._create_outputs(vpc, alb)
 
-    # --- Resource Methods --------------------------------------------------------
+
+    # ─── Resources ──────────────────────────────────────────────────────────────
 
     def _create_vpc(self) -> Vpc:
         return Vpc(self, "vpc-main",
@@ -186,63 +214,54 @@ class MyStack(TerraformStack):
             vpc_id = vpc.id,
             tags   = create_resource_tags(self.tags, "igw")
         )
-
         rt = RouteTable(self, "rt-public",
             vpc_id = vpc.id,
             tags   = create_resource_tags(self.tags, "public-rt")
         )
-
         Route(self, "internet-route",
-            route_table_id            = rt.id,
-            destination_cidr_block    = "0.0.0.0/0",
-            gateway_id                = igw.id
+            route_table_id         = rt.id,
+            destination_cidr_block = "0.0.0.0/0",
+            gateway_id             = igw.id
         )
-
         for i, subnet in enumerate(subnets):
             RouteTableAssociation(self, f"rt-assoc-public-{i+1}",
-                subnet_id       = subnet.id,
-                route_table_id  = rt.id
+                subnet_id      = subnet.id,
+                route_table_id = rt.id
             )
 
     def _create_security_groups(self, vpc: Vpc) -> tuple[SecurityGroup, SecurityGroup]:
-        egress_all = [ SecurityGroupEgress(
+        egress_all = [SecurityGroupEgress(
             description = "All outbound",
-            from_port   = 0,
-            to_port     = 0,
+            from_port   = 0, to_port = 0,
             protocol    = "-1",
             cidr_blocks = ["0.0.0.0/0"]
         )]
-
         alb_sg = SecurityGroup(self, "sg-alb",
-            name_prefix    = f"alb-sg-{self.unique}-",
-            vpc_id         = vpc.id,
-            description    = "Allow HTTP to ALB",
-            ingress        = [ SecurityGroupIngress(
+            name_prefix = f"alb-sg-{self.unique}-",
+            vpc_id       = vpc.id,
+            description  = "Allow HTTP to ALB",  # ASCII only
+            ingress      = [SecurityGroupIngress(
                 description = "HTTP from anywhere",
-                from_port   = 80,
-                to_port     = 80,
+                from_port   = 80, to_port = 80,
                 protocol    = "tcp",
                 cidr_blocks = ["0.0.0.0/0"]
             )],
-            egress         = egress_all,
-            tags           = create_resource_tags(self.tags, "alb-sg")
+            egress       = egress_all,
+            tags         = create_resource_tags(self.tags, "alb-sg")
         )
-
         inst_sg = SecurityGroup(self, "sg-instance",
-            name_prefix    = f"instance-sg-{self.unique}-",
-            vpc_id         = vpc.id,
-            description    = "Allow HTTP from ALB",
-            ingress        = [ SecurityGroupIngress(
-                description      = "From ALB SG",
-                from_port        = 80,
-                to_port          = 80,
-                protocol         = "tcp",
-                security_groups  = [alb_sg.id]
+            name_prefix = f"instance-sg-{self.unique}-",
+            vpc_id       = vpc.id,
+            description  = "Allow HTTP from ALB",
+            ingress      = [SecurityGroupIngress(
+                description     = "From ALB SG",
+                from_port       = 80, to_port = 80,
+                protocol        = "tcp",
+                security_groups = [alb_sg.id]
             )],
-            egress         = egress_all,
-            tags           = create_resource_tags(self.tags, "instance-sg")
+            egress       = egress_all,
+            tags         = create_resource_tags(self.tags, "instance-sg")
         )
-
         return alb_sg, inst_sg
 
     def _create_codedeploy_role(self) -> IamRole:
@@ -251,18 +270,15 @@ class MyStack(TerraformStack):
             assume_role_policy = CODEDEPLOY_ASSUME_ROLE_POLICY,
             tags               = self.tags
         )
-
         IamRolePolicy(self, "codedeploy-autoscaling-policy",
             name   = "codedeploy-autoscaling",
             role   = role.id,
             policy = CODEDEPLOY_AUTOSCALING_POLICY
         )
-
         IamRolePolicyAttachment(self, "attach-cd-managed",
             role       = role.name,
             policy_arn = "arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole"
         )
-
         return role
 
     def _create_ec2_role_and_profile(self) -> IamInstanceProfile:
@@ -271,18 +287,15 @@ class MyStack(TerraformStack):
             assume_role_policy = EC2_ASSUME_ROLE_POLICY,
             tags               = self.tags
         )
-
         IamRolePolicy(self, "ec2-s3-policy",
             name   = "ec2-s3-access",
             role   = role.id,
             policy = EC2_S3_POLICY
         )
-
         IamRolePolicyAttachment(self, "attach-ssm",
             role       = role.name,
             policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
         )
-
         return IamInstanceProfile(self, "profile-ec2",
             name = f"ec2-profile-{self.unique}",
             role = role.name
@@ -297,35 +310,30 @@ class MyStack(TerraformStack):
             subnets            = [s.id for s in subnets],
             tags               = create_resource_tags(self.tags, "alb")
         )
-
         blue_tg = LbTargetGroup(self, "tg-blue", **create_target_group_config(
             "blue", self.unique, vpc.id, self.tags
         ))
-
         green_tg = LbTargetGroup(self, "tg-green", **create_target_group_config(
             "green", self.unique, vpc.id, self.tags
         ))
-
         LbListener(self, "listener-prod",
             load_balancer_arn = alb.arn,
             port              = 80,
             protocol          = "HTTP",
-            default_action    = [ LbListenerDefaultAction(
+            default_action    = [LbListenerDefaultAction(
                 type             = "forward",
                 target_group_arn = blue_tg.arn
             )]
         )
-
         LbListener(self, "listener-test",
             load_balancer_arn = alb.arn,
             port              = 8080,
             protocol          = "HTTP",
-            default_action    = [ LbListenerDefaultAction(
+            default_action    = [LbListenerDefaultAction(
                 type             = "forward",
                 target_group_arn = green_tg.arn
             )]
         )
-
         return alb, blue_tg, green_tg
 
     def _create_auto_scaling_group(
@@ -333,46 +341,32 @@ class MyStack(TerraformStack):
         inst_sg: SecurityGroup,
         inst_profile: IamInstanceProfile,
         blue_tg: LbTargetGroup,
-        subnets: list[Subnet]
+        subnets: list[Subnet],
+        ami_id: str,
+        encoded_user_data: str
     ) -> AutoscalingGroup:
-        user_data = "\n".join([
-            "#!/bin/bash", 
-            "yum update -y && yum install -y ruby wget httpd",
-            "systemctl enable --now httpd",
-            'echo "<h1>Hello World V1 from $(hostname -f)</h1>" > /var/www/html/index.html',
-            'cd /home/ec2-user && \
-            wget https://aws-codedeploy-ap-south-1.s3.ap-south-1.amazonaws.com/latest/install && \
-            chmod +x ./install && \
-            ./install auto && \
-            systemctl enable --now codedeploy-agent',
-            "mkdir -p /home/ec2-user/my-application",
-            "chown -R ec2-user:ec2-user /home/ec2-user",
-            "chmod 755 /home/ec2-user"
-        ])
-
         lt = LaunchTemplate(self, "lt-app-blue",
             name_prefix            = f"app-lt-blue-{self.unique}-",
-            image_id              = "ami-03f4878755434977f",  # Amazon Linux 2023 AMI in ap-south-1
-            instance_type         = INSTANCE_TYPE,
+            image_id               = ami_id,
+            instance_type          = INSTANCE_TYPE,
             vpc_security_group_ids = [inst_sg.id],
-            iam_instance_profile  = {"name": inst_profile.name},
-            user_data            = user_data,
-            tags                 = create_resource_tags(self.tags, "lt-blue")
+            iam_instance_profile   = {"name": inst_profile.name},
+            user_data              = encoded_user_data,  # already Base64-encoded
+            tags                   = create_resource_tags(self.tags, "lt-blue")
         )
-
         return AutoscalingGroup(self, "asg-blue",
-            name                    = f"asg-blue-{self.unique}",
-            desired_capacity        = 2,
-            min_size               = 1,
-            max_size               = 4,
-            vpc_zone_identifier    = [s.id for s in subnets],
-            target_group_arns      = [blue_tg.arn],
-            health_check_type      = "ELB",
+            name                      = f"asg-blue-{self.unique}",
+            desired_capacity          = 2,
+            min_size                  = 1,
+            max_size                  = 4,
+            vpc_zone_identifier       = [s.id for s in subnets],
+            target_group_arns         = [blue_tg.arn],
+            health_check_type         = "ELB",
             health_check_grace_period = 300,
-            launch_template        = {"id": lt.id, "version": "$Latest"},
-            tag                    = [
-                AutoscalingGroupTag(key="Name", value="blue-server", propagate_at_launch=True),
-                AutoscalingGroupTag(key="Environment", value="Production", propagate_at_launch=True)
+            launch_template           = {"id": lt.id, "version": "$Latest"},
+            tag                       = [
+                AutoscalingGroupTag(key="Name",        value="blue-server", propagate_at_launch=True),
+                AutoscalingGroupTag(key="Environment", value="Production",      propagate_at_launch=True)
             ]
         )
 
@@ -388,7 +382,6 @@ class MyStack(TerraformStack):
             compute_platform = "Server",
             tags             = self.tags
         )
-
         CodedeployDeploymentGroup(self, "cd-deployment-group",
             app_name                       = app.name,
             deployment_group_name          = f"deploy-grp-{self.unique}",
@@ -435,13 +428,13 @@ class MyStack(TerraformStack):
             value       = vpc.id,
             description = "VPC ID"
         )
-
         TerraformOutput(self, "alb_dns_name",
             value       = alb.dns_name,
             description = "ALB DNS name"
         )
 
-# --- Entrypoint ---------------------------------------------------------------
+
+# ─── Entrypoint ───────────────────────────────────────────────────────────────
 
 def main():
     app = App()

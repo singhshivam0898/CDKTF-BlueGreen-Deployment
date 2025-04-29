@@ -1,0 +1,12 @@
+version: 0.0
+os: linux
+files:
+  # In this example, we are not copying new files to the instance.
+  # If your application files have changed, list them here.
+  - source: /
+    destination: /home/ec2-user/my-application
+hooks:
+  ApplicationStart:
+    - location: scripts/ApplicationStart.sh
+      timeout: 300
+      runas: root
